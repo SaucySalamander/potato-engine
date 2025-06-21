@@ -18,7 +18,7 @@ struct VertexInput {
 };
 
 struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
+    @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
 }
 
@@ -29,7 +29,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let clip_pos = camera.proj * view_pos;
 
     var out: VertexOutput;
-    out.clip_position = clip_pos;
+    out.position = clip_pos;
     out.color = vec3<f32>(0.75, 0.75, 0.75);
     return out;
 }

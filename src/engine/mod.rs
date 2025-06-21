@@ -1,36 +1,52 @@
-use std::{
-    process,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{mem::transmute, process, sync::Arc, time::Instant};
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use log::{debug, error, info};
 use wgpu::{
-    Buffer, Color, FragmentState, Instance, MultisampleState, PipelineLayoutDescriptor,
-    PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderModule, VertexAttribute,
-    VertexBufferLayout, VertexFormat, VertexState, util::DeviceExt,
+    Color, DepthBiasState, DepthStencilState, FragmentState, Instance, MultisampleState,
+    PipelineLayoutDescriptor, PrimitiveState, RenderPipeline, RenderPipelineDescriptor,
+    ShaderModule, StencilState, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
+    VertexState,
 };
 use winit::{
     application::ApplicationHandler,
+    event::ElementState,
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowAttributes},
 };
 
 use crate::{
-    engine::{camera::CameraUniform, mesh::Vertex, model::ModelUniform},
-    graphics::{
-        GPUContext,
-        bindgroups::{BindGroupLayoutRegistry, BindGroupRegistry},
-        init_render_pass,
-        shaders::load_shader,
-        viewports::{Viewport, ViewportDescription},
+    engine::{
+        r#async::{FrameIndex, ThreadPool},
+        buffers::CpuRingBuffer,
+        cameras::{CameraUniform, fps_camera::FpsCamera},
+        draw_queue::DrawQueue,
+        graphics::buffers::GpuRingBuffer,
+        mesh::{
+            Vertex,
+            mesh_allocator::{MeshAllocator, MeshHandle},
+        },
+        model::ModelUniform,
     },
+    engine_loop::{self, EngineLoop},
     utils::{FPSCounter, Registry},
 };
+use graphics::{
+    GPUContext,
+    bindgroups::{BindGroupLayoutRegistry, BindGroupRegistry},
+    buffers::{BufferInterface, BufferRegistry},
+    init_render_pass,
+    shaders::load_shader,
+    viewports::{Viewport, ViewportDescription},
+};
 
-mod camera;
+pub(crate) mod r#async;
+pub(crate) mod buffers;
+pub mod cameras;
+mod draw_queue;
+pub mod graphics;
 mod mesh;
-mod model;
+pub(crate) mod model;
 
 //TODO move to the ecs
 pub const CUBE_VERTICES: [Vec3; 8] = [
@@ -44,7 +60,7 @@ pub const CUBE_VERTICES: [Vec3; 8] = [
     Vec3::new(-0.5, 0.5, 0.5),
 ];
 
-pub const CUBE_INDICES: [u16; 36] = [
+pub const CUBE_INDICES: [u32; 36] = [
     0, 1, 2, 2, 3, 0, // Back
     4, 5, 6, 6, 7, 4, // Front
     0, 4, 7, 7, 3, 0, // Left
@@ -54,22 +70,26 @@ pub const CUBE_INDICES: [u16; 36] = [
 ];
 //
 
-#[derive(Debug)]
-pub struct Engine<'a> {
+pub struct Engine {
     startup: bool,
     window: Option<Arc<Window>>,
     instance: Option<Arc<Instance>>,
     gpu_context: Option<Arc<GPUContext>>,
-    viewports: Vec<Viewport<'a>>,
+    viewports: Vec<Viewport>,
     render_pipeline: Option<RenderPipeline>,
     fps_counter: Option<FPSCounter>,
+    frame_index: Option<FrameIndex>,
     engine_loop: Option<EngineLoop>,
     bind_group_layout_registry: Option<BindGroupLayoutRegistry>,
-    bind_group_registry: Option<BindGroupRegistry>,
-    vertex_buffer: Option<Buffer>,
-    index_buffer: Option<Buffer>,
+    gpu_buffer_registy: Option<BufferRegistry<Box<dyn BufferInterface>>>,
+    mesh_allocator: Option<MeshAllocator>,
+    mesh_handle: Option<MeshHandle>,
+    draw_queue: Option<GpuRingBuffer<DrawQueue>>,
+    thread_pool: Option<ThreadPool>,
+    static_mesh_handles: Option<Vec<MeshHandle>>,
 }
-impl<'a> Default for Engine<'a> {
+
+impl<'a> Default for Engine {
     fn default() -> Self {
         Engine {
             startup: true,
@@ -77,21 +97,26 @@ impl<'a> Default for Engine<'a> {
             instance: None,
             gpu_context: None,
             render_pipeline: None,
+            frame_index: Some(FrameIndex::new(3)),
             fps_counter: None,
             engine_loop: None,
             bind_group_layout_registry: None,
-            bind_group_registry: None,
-            vertex_buffer: None,
-            index_buffer: None,
+            mesh_allocator: None,
+            mesh_handle: None,
+            gpu_buffer_registy: None,
+            draw_queue: None,
+            thread_pool: None,
+            static_mesh_handles: None,
             viewports: Vec::new(),
         }
     }
 }
 
-impl<'a> Engine<'a> {
+impl Engine {
     fn init(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        info!("configuring control flow");
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        info!("starting threadpool");
+        self.thread_pool = Some(ThreadPool::new(4));
+        event_loop.listen_device_events(winit::event_loop::DeviceEvents::Always);
 
         info!("creating instance");
         self.instance = Some(Arc::new(Instance::default()));
@@ -119,88 +144,80 @@ impl<'a> Engine<'a> {
     fn setup_buffers(&mut self) {
         let gpu_context = self.gpu_context.as_ref().expect("gpu context should exist");
         let device = &gpu_context.device;
+        let queue = &gpu_context.queue;
 
         info!("creating bind group layout registry");
         self.bind_group_layout_registry = Some(BindGroupLayoutRegistry::default());
 
-        info!("creating bind group registry");
-        self.bind_group_registry = Some(BindGroupRegistry::default());
+        info!("creating buffer reg");
+        self.gpu_buffer_registy = Some(BufferRegistry::<Box<dyn BufferInterface>>::default());
 
         info!("creating uniform buffers");
-        //TODO clean up and group into files/functions properly
-        //------------------------
-        // Convert to Vertex structs
-        let vertices: Vec<Vertex> = CUBE_VERTICES
-            .iter()
-            .map(|v| Vertex {
-                position: v.to_array(),
-            })
-            .collect();
-
-        // Upload vertex buffer
-        self.vertex_buffer = Some(gpu_context.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Cube Vertex Buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            },
-        ));
-
-        // Upload index buffer
-        self.index_buffer = Some(
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Cube Index Buffer"),
-                contents: bytemuck::cast_slice(&CUBE_INDICES),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
-        );
+        self.mesh_allocator = Some(MeshAllocator::new(device, 3000.0 as u64, 3000.0 as u64));
 
         let camera_uniform = CameraUniform::default();
-        let _ = camera_uniform.create_and_store_camera_uniform_bindings(
-            device,
-            self.bind_group_layout_registry
-                .as_mut()
-                .expect("bind group layout registry should exist"),
-            self.bind_group_registry
-                .as_mut()
-                .expect("bind group registry should exist"),
-        );
+        info!("{:?}", camera_uniform);
+        let _ = camera_uniform
+            .create_and_store_buffers(
+                device,
+                queue,
+                self.bind_group_layout_registry
+                    .as_mut()
+                    .expect("bind group layout registry should exist"),
+                self.gpu_buffer_registy
+                    .as_mut()
+                    .expect("buffer registry should exist"),
+                0,
+            )
+            .unwrap_or_else(|err| {
+                error!("failed to init camera buffer {err}");
+                process::exit(1)
+            });
 
-        let model_uniform = ModelUniform::new(Mat4::IDENTITY);
-        let _ = model_uniform.create_and_store_model_uniform_bindings(
+        let model_uniform = ModelUniform::default();
+        let _ = model_uniform.create_and_store_buffers(
             device,
+            queue,
             self.bind_group_layout_registry
                 .as_mut()
                 .expect("bind group layout registry should exist"),
-            self.bind_group_registry
+            self.gpu_buffer_registy
                 .as_mut()
-                .expect("bind group registry should exist"),
+                .expect("buffer registry should exist"),
+            0,
         );
-        //------------------------
     }
 
     fn create_main_viewport(&mut self) {
+        let surface = self
+            .instance
+            .as_ref()
+            .expect("instance must exist")
+            .create_surface(self.window.as_ref().unwrap().clone())
+            .map_err(|err| {
+                error!("failed to create surface {err}");
+                std::process::exit(1);
+            })
+            .map(|surface| unsafe { transmute::<Surface<'_>, Surface<'static>>(surface) });
+
+        let surface = surface.unwrap();
+
         info!("creating main viewport");
-        let viewport_description: Arc<ViewportDescription<'a>> =
-            Arc::new(ViewportDescription::new(
-                self.window.as_ref().expect("window should exist").clone(),
-                Color::BLACK,
-                self.instance
-                    .as_ref()
-                    .expect("instance should exist")
-                    .clone(),
-            ));
-        let surface = &viewport_description.clone().surface;
-
-        self.gpu_context = Some(Arc::new(GPUContext::init(
-            self.instance.as_ref().expect("instance must exist"),
+        let viewport_description: ViewportDescription = ViewportDescription::new(
+            self.window.as_ref().expect("window should exist").clone(),
+            Color::BLACK,
             surface,
-        )));
-
-        let viewport = ViewportDescription::build_viewport(
-            viewport_description.clone(),
-            self.gpu_context.as_ref().expect("gpu context should exist"),
         );
+
+        let gpu_context = Arc::new(GPUContext::init(
+            self.instance.as_ref().expect("instance must exist"),
+            &viewport_description.surface,
+        ));
+
+        self.gpu_context = Some(gpu_context.clone());
+
+        let viewport = viewport_description
+            .build_viewport(self.gpu_context.as_ref().expect("gpu context should exist"));
 
         self.viewports.push(viewport);
     }
@@ -208,6 +225,42 @@ impl<'a> Engine<'a> {
     fn start_engine_loop(&mut self) {
         info!("init engine_loop");
         self.engine_loop = Some(EngineLoop::default());
+        self.engine_loop.as_mut().unwrap().cpu_buffer_registry =
+            Some(BufferRegistry::<Box<dyn BufferInterface>>::default());
+        let cpu_buffer_registry = self
+            .engine_loop
+            .as_mut()
+            .unwrap()
+            .cpu_buffer_registry
+            .as_mut()
+            .unwrap();
+        cpu_buffer_registry.insert(
+            String::from("camera_cpu_uniform_triple"),
+            Box::new(CpuRingBuffer::<CameraUniform>::new(CameraUniform::default())),
+        );
+        cpu_buffer_registry.insert(
+            String::from("model_cpu_uniform_triple"),
+            Box::new(CpuRingBuffer::<ModelUniform>::new(ModelUniform::default())),
+        );
+
+        let vertices: Vec<Vertex> = CUBE_VERTICES
+            .iter()
+            .map(|v| Vertex {
+                position: v.to_array(),
+            })
+            .collect();
+        self.static_mesh_handles = self.mesh_allocator.as_mut().unwrap().upload_static_mesh(
+            &self.gpu_context.as_ref().unwrap().queue,
+            &vertices,
+            &CUBE_INDICES,
+        );
+
+        info!("create fps camera");
+        self.engine_loop.as_mut().unwrap().fps_camera = Some(FpsCamera::new(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 5.0,
+        }));
     }
 
     fn load_shaders(&mut self) -> ShaderModule {
@@ -275,7 +328,21 @@ impl<'a> Engine<'a> {
             vertex,
             fragment: Some(fragment),
             primitive: PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(DepthStencilState {
+                format: self
+                    .viewports
+                    .get(0)
+                    .unwrap()
+                    .description
+                    .depth
+                    .as_ref()
+                    .unwrap()
+                    .format,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
             multisample: MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -283,35 +350,8 @@ impl<'a> Engine<'a> {
         self.render_pipeline = Some(device.create_render_pipeline(render_pipeline_descriptor));
     }
 }
-#[derive(Debug)]
-struct EngineLoop {
-    last_time: Instant,
-    accumulator: Duration,
-    delta_time: Duration,
-    previous_state: f32,
-    current_state: f32,
-}
-impl Default for EngineLoop {
-    fn default() -> Self {
-        Self {
-            last_time: Instant::now(),
-            accumulator: Duration::ZERO,
-            delta_time: Duration::from_secs_f64(1.0 / 60.0),
-            previous_state: 0.0,
-            current_state: 0.0,
-        }
-    }
-}
 
-impl EngineLoop {
-    fn update(&mut self) {
-        // Todo update state of game
-        // self.previous_state = self.current_state;
-        // self.current_state += 50.0 * self.delta_time.as_secs_f32();
-    }
-}
-
-impl<'a> ApplicationHandler for Engine<'a> {
+impl ApplicationHandler for Engine {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         if self.startup {
             self.init(event_loop);
@@ -322,6 +362,12 @@ impl<'a> ApplicationHandler for Engine<'a> {
             self.startup = false;
         }
 
+        self.window.as_ref().unwrap().set_cursor_visible(false);
+        let _ = self
+            .window
+            .as_ref()
+            .unwrap()
+            .set_cursor_grab(winit::window::CursorGrabMode::Locked);
         info!("requesting first redraw");
         self.window
             .as_ref()
@@ -329,23 +375,20 @@ impl<'a> ApplicationHandler for Engine<'a> {
             .request_redraw();
     }
 
+    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let _ = self
+            .window
+            .as_ref()
+            .unwrap()
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.as_ref().unwrap().set_cursor_visible(true);
+    }
+
     fn new_events(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
         cause: winit::event::StartCause,
     ) {
-        if let Some(engine_loop) = &mut self.engine_loop {
-            let now = Instant::now();
-            let frame_time = now - engine_loop.last_time;
-            engine_loop.last_time = now;
-
-            engine_loop.accumulator += frame_time;
-
-            while engine_loop.accumulator >= engine_loop.delta_time {
-                engine_loop.update();
-                engine_loop.accumulator -= engine_loop.delta_time;
-            }
-        }
     }
 
     fn window_event(
@@ -356,13 +399,9 @@ impl<'a> ApplicationHandler for Engine<'a> {
     ) {
         debug!("processing event {:?}", event);
         match event {
-            winit::event::WindowEvent::ActivationTokenDone {
-                serial: _,
-                token: _,
-            } => {}
             winit::event::WindowEvent::Resized(physical_size) => {
                 let window = self.window.as_ref().expect("window must exist");
-                let viewport = self.viewports.get(0).expect("viewport must exist");
+                let viewport = self.viewports.get_mut(0).expect("viewport must exist");
                 let device = &self.gpu_context.as_ref().expect("device must exist").device;
 
                 let mut config = viewport.config.clone();
@@ -371,93 +410,60 @@ impl<'a> ApplicationHandler for Engine<'a> {
                 config.height = physical_size.height;
 
                 viewport.description.surface.configure(device, &config);
+                viewport.description.create_depth_resources(device, &config);
 
                 window.request_redraw();
             }
-            winit::event::WindowEvent::Moved(_physical_position) => {}
             winit::event::WindowEvent::CloseRequested => {
                 info!("Close request processing");
                 event_loop.exit();
             }
-            winit::event::WindowEvent::Destroyed => {}
-            winit::event::WindowEvent::DroppedFile(_path_buf) => {}
-            winit::event::WindowEvent::HoveredFile(_path_buf) => {}
-            winit::event::WindowEvent::HoveredFileCancelled => {}
-            winit::event::WindowEvent::Focused(_) => {}
             winit::event::WindowEvent::KeyboardInput {
-                device_id: _,
-                event: _,
-                is_synthetic: _,
-            } => {}
-            winit::event::WindowEvent::ModifiersChanged(_modifiers) => {}
-            winit::event::WindowEvent::Ime(_ime) => {}
-            winit::event::WindowEvent::CursorMoved {
-                device_id: _,
-                position: _,
-            } => {}
-            winit::event::WindowEvent::CursorEntered { device_id: _ } => {}
-            winit::event::WindowEvent::CursorLeft { device_id: _ } => {}
-            winit::event::WindowEvent::MouseWheel {
-                device_id: _,
-                delta: _,
-                phase: _,
-            } => {}
-            winit::event::WindowEvent::MouseInput {
-                device_id: _,
-                state: _,
-                button: _,
-            } => {}
-            winit::event::WindowEvent::PinchGesture {
-                device_id: _,
-                delta: _,
-                phase: _,
-            } => {}
-            winit::event::WindowEvent::PanGesture {
-                device_id: _,
-                delta: _,
-                phase: _,
-            } => {}
-            winit::event::WindowEvent::DoubleTapGesture { device_id: _ } => {}
-            winit::event::WindowEvent::RotationGesture {
-                device_id: _,
-                delta: _,
-                phase: _,
-            } => {}
-            winit::event::WindowEvent::TouchpadPressure {
-                device_id: _,
-                pressure: _,
-                stage: _,
-            } => {}
-            winit::event::WindowEvent::AxisMotion {
-                device_id: _,
-                axis: _,
-                value: _,
-            } => {}
-            winit::event::WindowEvent::Touch(_touch) => {}
-            winit::event::WindowEvent::ScaleFactorChanged {
-                scale_factor: _,
-                inner_size_writer: _,
-            } => {}
-            winit::event::WindowEvent::ThemeChanged(_theme) => {}
-            winit::event::WindowEvent::Occluded(_) => {}
+                device_id,
+                event,
+                is_synthetic,
+            } => {
+                let pressed = event.state == ElementState::Pressed;
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::KeyW) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_w = pressed
+                    }
+                    PhysicalKey::Code(KeyCode::KeyA) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_a = pressed
+                    }
+                    PhysicalKey::Code(KeyCode::KeyD) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_d = pressed
+                    }
+                    PhysicalKey::Code(KeyCode::KeyS) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_s = pressed
+                    }
+                    PhysicalKey::Code(KeyCode::Space) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_space = pressed
+                    }
+                    PhysicalKey::Code(KeyCode::ControlLeft) => {
+                        self.engine_loop.as_mut().unwrap().input_state.key_ctrl = pressed
+                    }
+                    _ => {}
+                }
+            }
             winit::event::WindowEvent::RedrawRequested => {
-                // info!("redraw requested");
                 let viewport = self.viewports.get(0).expect("viewport must exist");
-                let descriptor = viewport.description.as_ref();
+                let descriptor = &viewport.description;
                 let render_pipeline = self
                     .render_pipeline
                     .as_ref()
                     .expect("render pipeline must exist");
-                let engine_loop = self.engine_loop.as_ref().expect("engine loop must exist");
-                let bind_group_registry = self
-                    .bind_group_registry
-                    .as_ref()
-                    .expect("bindgroups must exist");
+                self.engine_loop.as_mut().unwrap().sync_buffers(
+                    self.gpu_buffer_registy.as_mut().unwrap(),
+                    self.frame_index.as_ref().unwrap().index(),
+                    &self
+                        .gpu_context
+                        .as_ref()
+                        .expect("gpu context must exist")
+                        .queue,
+                );
+
                 descriptor.window.pre_present_notify();
-
-                let alpha =
-                    engine_loop.accumulator.as_secs_f32() / engine_loop.delta_time.as_secs_f32();
-
                 let output = descriptor.surface.get_current_texture().unwrap();
 
                 let view = output.texture.create_view(&Default::default());
@@ -474,12 +480,13 @@ impl<'a> ApplicationHandler for Engine<'a> {
                     &view,
                     descriptor,
                     render_pipeline,
-                    bind_group_registry,
-                    self.vertex_buffer
-                        .as_ref()
-                        .expect("vertex buffer must be created"),
-                    self.index_buffer.as_ref().expect("index buffer must exist"),
-                    CUBE_INDICES,
+                    self.gpu_buffer_registy
+                        .as_mut()
+                        .expect("gpu buffer registry should exist"),
+                    self.frame_index.as_mut().unwrap(),
+                    self.mesh_allocator.as_mut().unwrap(),
+                    self.static_mesh_handles.as_ref(),
+                    self.mesh_handle.as_ref(),
                 );
 
                 let _ = self
@@ -491,20 +498,54 @@ impl<'a> ApplicationHandler for Engine<'a> {
 
                 output.present();
 
-                let interpolated =
-                    engine_loop.previous_state * (1.0 - alpha) + engine_loop.current_state * alpha;
-
+                self.frame_index.as_mut().unwrap().advance();
                 self.fps_counter
                     .as_mut()
                     .expect("fps counter must exist")
                     .tick();
             }
+            _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        match event {
+            winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } => {
+                let mut input = &mut self.engine_loop.as_mut().unwrap().input_state;
+                input.mouse_delta_x += dx as f32;
+                input.mouse_delta_y += dy as f32;
+            }
+            _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         if let Some(window) = &self.window {
-            window.request_redraw();
+            if let Some(engine_loop) = &mut self.engine_loop {
+                let now = Instant::now();
+                let frame_time = now - engine_loop.last_time;
+                engine_loop.last_time = now;
+                engine_loop.accumulator += frame_time;
+
+                while engine_loop.accumulator >= engine_loop.delta_time {
+                    engine_loop.update_logic();
+
+                    engine_loop.sim_frame_index.advance();
+                    engine_loop.accumulator -= engine_loop.delta_time;
+                }
+
+                window.request_redraw();
+
+                debug!("configuring control flow");
+                let next_logic_update = now + (engine_loop.delta_time - engine_loop.accumulator);
+                event_loop
+                    .set_control_flow(winit::event_loop::ControlFlow::WaitUntil(next_logic_update));
+            }
         }
     }
 }

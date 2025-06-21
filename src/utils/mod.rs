@@ -35,7 +35,13 @@ impl FPSCounter {
 }
 
 pub trait Registry<K, V> {
+    type KeysIterator<'a>: Iterator<Item = &'a K> + 'a
+        where K: 'a, V: 'a, Self: 'a;
+    type ValuesIterator<'a>: Iterator<Item = &'a V> + 'a
+        where K: 'a, V: 'a, Self: 'a;
     fn insert(&mut self, key: K, value: V);
     fn get(&self, key: &K) -> Option<&V>;
     fn get_mut(&mut self, key: &K) -> Option<&mut V>;
+    fn keys(&self) -> Self::KeysIterator<'_>;
+    fn valuse(&self) -> Self::ValuesIterator<'_>;
 }

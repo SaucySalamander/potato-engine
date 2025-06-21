@@ -6,7 +6,7 @@ use winit::event_loop::EventLoop;
 use crate::engine::Engine;
 
 mod engine;
-mod graphics;
+mod engine_loop;
 mod utils;
 mod ecs;
 
