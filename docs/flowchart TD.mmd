@@ -1,0 +1,19 @@
+flowchart TD
+    A("init logger")
+    B("init cpu tracing/timing")
+    C("event loop entry")
+
+    subgraph potato_engine
+        subgraph main_entry
+        A --> B --> C 
+        end
+        subgraph eventloop
+        end
+        subgraph ecs
+        end
+        subgraph render_pipeline
+        end
+        main_entry --> eventloop
+        eventloop --> ecs
+        eventloop --> render_pipeline
+    end

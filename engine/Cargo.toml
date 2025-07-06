@@ -1,0 +1,16 @@
+[package]
+name = "engine"
+version = "0.2.0"
+edition = "2024"
+
+[lib]
+
+[dependencies]
+ecs ={ path = "../ecs"}
+bytemuck = "1.23.1"
+env_logger = "0.11.8"
+glam = "0.30.4"
+log = "0.4.27"
+pollster = "0.4.0"
+wgpu = { version = "25.0.2" }
+winit = "0.30.11"
