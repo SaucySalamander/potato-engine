@@ -1,8 +1,6 @@
 use std::any::Any;
 
-use crate::{
-    cameras::CameraUniform, commands::IndirectDrawCommand
-};
+use crate::{cameras::CameraUniform, commands::IndirectDrawCommand};
 
 pub trait QueueInterface: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;

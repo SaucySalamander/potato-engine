@@ -11,10 +11,12 @@ args = ["clean"]
 command = "cargo"
 args = ["build"]
 
-[tasks.clean_run]
-command = "./target/debug/potato-engine"
+[tasks.clean_run]   
+workspace = false
+command = "./target/debug/test_game"
 dependencies = ["clean", "build"]
 
 [tasks.run]
-command = "./target/debug/potato-engine"
+workspace = false
+command = "./target/debug/test_game"
 dependencies = ["build"]

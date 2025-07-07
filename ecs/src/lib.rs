@@ -3,10 +3,18 @@ use std::any::TypeId;
 use glam::{Mat4, Vec3};
 
 use crate::{
-    archetypes::{Archetype, ArchetypeKey}, cameras::CameraUniform, commands::IndirectDrawCommand, components::{
+    archetypes::{Archetype, ArchetypeKey},
+    cameras::CameraUniform,
+    commands::IndirectDrawCommand,
+    components::{
         Camera, ComponentTuple, ComponentTypeIndexRegistry, FpsCamera, MeshHandle, Position,
         Transform,
-    }, entities::{EntityAllocator, EntityId}, input::InputState, queries::Query, queues::{CpuRingQueue, QueueInterface}, registries::{RegisterKey, Registry}
+    },
+    entities::{EntityAllocator, EntityId},
+    input::InputState,
+    queries::Query,
+    queues::{CpuRingQueue, QueueInterface},
+    registries::{RegisterKey, Registry},
 };
 
 mod archetypes;
@@ -14,10 +22,10 @@ pub mod cameras;
 pub mod commands;
 pub mod components;
 mod entities;
+pub mod input;
 mod queries;
 pub mod queues;
 pub mod registries;
-pub mod input;
 
 pub struct World {
     archetypes: Vec<(ArchetypeKey, Archetype)>,
