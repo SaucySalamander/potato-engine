@@ -1,6 +1,5 @@
 use std::any::TypeId;
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RegisterKey {
     pub type_id: TypeId,

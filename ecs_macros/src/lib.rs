@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Index, Path};
+use syn::{Index, Path, parse_macro_input};
 
 #[proc_macro]
 pub fn impl_query(input: TokenStream) -> TokenStream {
@@ -85,12 +85,12 @@ pub fn impl_query_combinations(input: TokenStream) -> TokenStream {
                 .collect();
 
             let item_type = quote! { (#(#ref_types),*) };
-            
+
             let get_columns: Vec<_> = type_idents.iter().zip(&mut_refs).enumerate().map(|(i,(ty, is_mut))| {
                 let col_indent = format_ident!("col_{}", i);
                 let index = Index::from(i);
                 if *is_mut {
-                    quote! { let #col_indent: &'world mut Vec<#ty> = unsafe{&mut *ptr}.get_column_mut(indices[#index])?; } 
+                    quote! { let #col_indent: &'world mut Vec<#ty> = unsafe{&mut *ptr}.get_column_mut(indices[#index])?; }
                 } else {
                     quote! { let #col_indent: &'world Vec<#ty> = unsafe{&mut *ptr}.get_column(indices[#index])?; }
                 }

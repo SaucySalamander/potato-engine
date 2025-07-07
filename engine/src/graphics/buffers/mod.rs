@@ -132,14 +132,17 @@ pub fn _create_buffer_with_data(
 }
 
 pub fn sync_buffers(
-    cpu_queue_registry: &mut Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>,
+    cpu_queue_registry: &mut Arc<
+        Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>,
+    >,
     gpu_buffer_registry: &mut Registry<Box<dyn BufferInterface>>,
     sim_frame_index: usize,
     gpu_frame_index: usize,
     queue: &Queue,
 ) {
-    let camera_queue_key =
-        ecs::registries::RegisterKey::from_label::<CpuRingQueue<ecs::cameras::CameraUniform>>("camera_cpu_uniform_triple");
+    let camera_queue_key = ecs::registries::RegisterKey::from_label::<
+        CpuRingQueue<ecs::cameras::CameraUniform>,
+    >("camera_cpu_uniform_triple");
     let camera_buffer_key =
         RegisterKey::from_label::<GpuRingBuffer<CameraUniform>>("camera_gpu_uniform_triple");
     //Camera buffer
@@ -154,8 +157,9 @@ pub fn sync_buffers(
     );
 
     //IndirectDraw
-    let indirect_draw_queue_key =
-        ecs::registries::RegisterKey::from_label::<CpuRingQueue<Vec<IndirectDrawCommand>>>("indirect_draw_queue");
+    let indirect_draw_queue_key = ecs::registries::RegisterKey::from_label::<
+        CpuRingQueue<Vec<IndirectDrawCommand>>,
+    >("indirect_draw_queue");
     let indirect_draw_buffer_key =
         RegisterKey::from_label::<GpuRingBuffer<IndirectDraw>>("indirect_draw_buffer");
     let model_buffer_key =
@@ -229,7 +233,9 @@ pub fn sync_buffers(
 
 fn sync_buffer_with_queue<T: 'static + Send + Sync + Pod, U: 'static + Send + Sync + Pod>(
     cpu_key: &ecs::registries::RegisterKey,
-    cpu_buffer_registry: &Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>,
+    cpu_buffer_registry: &Arc<
+        Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>,
+    >,
     gpu_key: &RegisterKey,
     gpu_buffer_registry: &mut Registry<Box<dyn BufferInterface>>,
     queue: &Queue,

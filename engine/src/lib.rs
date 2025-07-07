@@ -94,7 +94,8 @@ pub struct Engine {
     sim_frame_index: FrameIndex,
     frame_index: FrameIndex,
     bind_group_layout_registry: Option<Registry<BindGroupLayout>>,
-    cpu_buffer_registry: Option<Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>>,
+    cpu_buffer_registry:
+        Option<Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>>,
     gpu_buffer_registry: Option<Registry<Box<dyn BufferInterface>>>,
     mesh_allocator: Option<MeshAllocator>,
     input_state: ecs::input::InputState,
@@ -169,11 +170,14 @@ impl Engine {
             Box<dyn QueueInterface + Send + Sync>,
         >::default())));
         let mut cpu_buffer_registry = self.cpu_buffer_registry.as_mut().unwrap().lock().unwrap();
-        let camera_cpu_uniform_key =
-            ecs::registries::RegisterKey::from_label::<CpuRingQueue<ecs::cameras::CameraUniform>>("camera_cpu_uniform_triple");
+        let camera_cpu_uniform_key = ecs::registries::RegisterKey::from_label::<
+            CpuRingQueue<ecs::cameras::CameraUniform>,
+        >("camera_cpu_uniform_triple");
         cpu_buffer_registry.register_key(
             camera_cpu_uniform_key,
-            Box::new(CpuRingQueue::<ecs::cameras::CameraUniform>::new(ecs::cameras::CameraUniform::default())),
+            Box::new(CpuRingQueue::<ecs::cameras::CameraUniform>::new(
+                ecs::cameras::CameraUniform::default(),
+            )),
         );
         // let model_cpu_uniform_key =
         //     RegisterKey::from_label::<CpuRingQueue<ModelUniform>>("model_cpu_uniform_triple");
@@ -181,9 +185,9 @@ impl Engine {
         //     model_cpu_uniform_key,
         //     Box::new(CpuRingQueue::<ModelUniform>::new(ModelUniform::default())),
         // );
-        let indirect_draw_cpu_key = ecs::registries::RegisterKey::from_label::<CpuRingQueue<Vec<IndirectDrawCommand>>>(
-            "indirect_draw_queue",
-        );
+        let indirect_draw_cpu_key = ecs::registries::RegisterKey::from_label::<
+            CpuRingQueue<Vec<IndirectDrawCommand>>,
+        >("indirect_draw_queue");
         cpu_buffer_registry.register_key(
             indirect_draw_cpu_key,
             Box::new(CpuRingQueue::<Vec<IndirectDrawCommand>>::new(vec![
@@ -351,7 +355,9 @@ impl Engine {
         info!("loading shaders");
         let gpu_context = self.gpu_context.as_ref().expect("gpu context should exist");
         let device = &gpu_context.device;
-        let shader_name = String::from("/home/sevenofnine/Git/potato-engine/engine/src/graphics/shaders/shader.wgsl");
+        let shader_name = String::from(
+            "/home/sevenofnine/Git/potato-engine/engine/src/graphics/shaders/shader.wgsl",
+        );
         load_shader(device, shader_name)
     }
 

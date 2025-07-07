@@ -8,4 +8,4 @@ edition = "2024"
 [dependencies]
 ecs_macros = { path = "../ecs_macros" }
 glam = "0.30.4"
-bytemuck = "1.23.1"
+bytemuck = {version = "1.23.1", features = ["derive"]}
