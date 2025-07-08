@@ -173,3 +173,109 @@ pub fn init_render_pass(
         // info!("gpu frame_index drawn: {}, drawcount: {}, i: {}", frame_index.index(), draw_count, i);
     }
 }
+
+    fn update_fps_camera_system(
+        &mut self,
+        input: &InputState,
+        delta_time: f32,
+        sim_frame_index: usize,
+        cpu_queue_registry: &mut Registry<Box<dyn QueueInterface + Send + Sync>>,
+    ) {
+        for (camera, pos, _) in self.query::<(&mut FpsCamera, &mut Position, &Camera)>() {
+            let forward = Vec3::new(
+                camera.yaw.cos() * camera.pitch.cos(),
+                camera.pitch.sin(),
+                camera.yaw.sin() * camera.pitch.cos(),
+            )
+            .normalize();
+            let right = forward.cross(Vec3::Y).normalize();
+            let up = right.cross(forward).normalize();
+
+            // Movement
+            let mut velocity = Vec3::ZERO;
+            if input.key_w {
+                velocity += forward;
+            }
+            if input.key_s {
+                velocity -= forward;
+            }
+            if input.key_d {
+                velocity += right;
+            }
+            if input.key_a {
+                velocity -= right;
+            }
+            if input.key_space {
+                velocity += up;
+            }
+            if input.key_ctrl {
+                velocity -= up;
+            }
+
+            if velocity.length_squared() > 0.0 {
+                *pos = Position(pos.0 + velocity.normalize() * camera.speed * delta_time);
+            }
+
+            camera.yaw += input.mouse_delta_x * camera.sensitivity;
+            camera.pitch -= input.mouse_delta_y * camera.sensitivity;
+            camera.pitch = camera
+                .pitch
+                .clamp(-89.9_f32.to_radians(), 89.9_f32.to_radians());
+
+            //updating cpu buffers
+            let camera_queue_key =
+                RegisterKey::from_label::<CpuRingQueue<CameraUniform>>("camera_cpu_uniform_triple");
+            let camera_queue_entry = cpu_queue_registry.get_mut(&camera_queue_key).unwrap();
+            let camera_uniform_triple = camera_queue_entry
+                .as_mut_any()
+                .downcast_mut::<CpuRingQueue<CameraUniform>>()
+                .unwrap();
+            let camera_uniform = camera_uniform_triple.get_write(sim_frame_index);
+            camera_uniform.view = Mat4::look_to_rh(pos.0, forward, Vec3::Y).to_cols_array_2d();
+            camera_uniform.projection =
+                Mat4::perspective_rh(0.785, 16.0 / 9.0, 0.1, 1000.0).to_cols_array_2d();
+        }
+    }
+
+    fn run_render_submission_system(
+        &mut self,
+        sim_frame_index: usize,
+        cpu_queue_registry: &mut Registry<Box<dyn QueueInterface + Send + Sync>>,
+    ) {
+        let key = RegisterKey::from_label::<CpuRingQueue<Vec<IndirectDrawCommand>>>(
+            "indirect_draw_queue",
+        );
+        if let Some(queue) = cpu_queue_registry.get_mut(&key) {
+            let queue = queue
+                .as_mut_any()
+                .downcast_mut::<CpuRingQueue<Vec<IndirectDrawCommand>>>()
+                .expect("Failed to downcast indirect draw queue");
+
+            // let prev_index = (sim_frame_index + 2) % 3;
+            // let prev_data = queue.get_read(prev_index).clone();
+
+            let mut first_instance_counter = 0;
+            let current_data = queue.get_write(sim_frame_index);
+            current_data.clear();
+
+            let mut batch: Vec<Transform> = Vec::new();
+            let mut mesh_handle = MeshHandle {
+                vertex_offset: 0,
+                index_offset: 0,
+                vertex_count: 0,
+                index_count: 0,
+            };
+
+            for (i, (transform, mesh)) in self.query::<(&Transform, &MeshHandle)>().enumerate() {
+                batch.push(transform.clone());
+                mesh_handle = mesh.clone();
+            }
+
+            current_data.push(IndirectDrawCommand {
+                instance_count: batch.len() as u32,
+                first_instance: first_instance_counter,
+                mesh: mesh_handle,
+                transform: batch.clone(),
+            });
+        }
+    }

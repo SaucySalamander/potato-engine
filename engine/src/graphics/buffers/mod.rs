@@ -21,7 +21,6 @@ use crate::{
 };
 use ecs::{
     commands::IndirectDrawCommand,
-    queues::{CpuRingQueue, QueueInterface},
 };
 
 pub trait BufferInterface: Any + Send + Sync {

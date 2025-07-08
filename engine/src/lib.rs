@@ -28,14 +28,12 @@ use crate::{
         sync_buffers,
     },
     graphics::mesh::{Vertex, mesh_allocator::MeshAllocator},
-    input::InputState,
     utils::{FPSCounter, RegisterKey, Registry, ThreadPool},
 };
 use ecs::{
     World,
     commands::IndirectDrawCommand,
     components::{self, Camera, FpsCamera, Position},
-    queues::{CpuRingQueue, QueueInterface},
 };
 use graphics::{
     GPUContext, init_render_pass,
@@ -94,8 +92,6 @@ pub struct Engine {
     sim_frame_index: FrameIndex,
     frame_index: FrameIndex,
     bind_group_layout_registry: Option<Registry<BindGroupLayout>>,
-    cpu_buffer_registry:
-        Option<Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>>,
     gpu_buffer_registry: Option<Registry<Box<dyn BufferInterface>>>,
     mesh_allocator: Option<MeshAllocator>,
     input_state: ecs::input::InputState,
@@ -119,7 +115,6 @@ impl<'a> Default for Engine {
             bind_group_layout_registry: None,
             mesh_allocator: None,
             gpu_buffer_registry: None,
-            cpu_buffer_registry: None,
             thread_pool: None,
             viewports: Vec::new(),
             input_state: ecs::input::InputState::default(),
@@ -153,7 +148,6 @@ impl Engine {
         let shader = &self.load_shaders();
 
         self.setup_buffers();
-        self.setup_queues();
 
         self.create_render_pipeline(shader);
 
@@ -161,38 +155,6 @@ impl Engine {
             &mut self.world.lock().unwrap(),
             self.mesh_allocator.as_mut().unwrap(),
             &self.gpu_context.as_ref().unwrap().queue,
-        );
-    }
-
-    fn setup_queues(&mut self) {
-        info!("creating cpu buffer registry");
-        self.cpu_buffer_registry = Some(Arc::new(Mutex::new(ecs::registries::Registry::<
-            Box<dyn QueueInterface + Send + Sync>,
-        >::default())));
-        let mut cpu_buffer_registry = self.cpu_buffer_registry.as_mut().unwrap().lock().unwrap();
-        let camera_cpu_uniform_key = ecs::registries::RegisterKey::from_label::<
-            CpuRingQueue<ecs::cameras::CameraUniform>,
-        >("camera_cpu_uniform_triple");
-        cpu_buffer_registry.register_key(
-            camera_cpu_uniform_key,
-            Box::new(CpuRingQueue::<ecs::cameras::CameraUniform>::new(
-                ecs::cameras::CameraUniform::default(),
-            )),
-        );
-        // let model_cpu_uniform_key =
-        //     RegisterKey::from_label::<CpuRingQueue<ModelUniform>>("model_cpu_uniform_triple");
-        // cpu_buffer_registry.register_key(
-        //     model_cpu_uniform_key,
-        //     Box::new(CpuRingQueue::<ModelUniform>::new(ModelUniform::default())),
-        // );
-        let indirect_draw_cpu_key = ecs::registries::RegisterKey::from_label::<
-            CpuRingQueue<Vec<IndirectDrawCommand>>,
-        >("indirect_draw_queue");
-        cpu_buffer_registry.register_key(
-            indirect_draw_cpu_key,
-            Box::new(CpuRingQueue::<Vec<IndirectDrawCommand>>::new(vec![
-                IndirectDrawCommand::default(),
-            ])),
         );
     }
 
@@ -569,23 +531,6 @@ impl ApplicationHandler for Engine {
                     .device
                     .create_command_encoder(&Default::default());
 
-                let indirect_draw_key = ecs::registries::RegisterKey::from_label::<
-                    CpuRingQueue<Vec<IndirectDrawCommand>>,
-                >("indirect_draw_queue");
-                let draw_count = self
-                    .cpu_buffer_registry
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .get(&indirect_draw_key)
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<CpuRingQueue<Vec<IndirectDrawCommand>>>()
-                    .unwrap()
-                    .get_read(self.frame_index.index())
-                    .len();
-
                 init_render_pass(
                     &mut encoder,
                     &view,
@@ -643,19 +588,16 @@ impl ApplicationHandler for Engine {
 
             while self.accumulator >= self.delta_time {
                 let world = self.world.clone();
-                let cpu_queue_registry = self.cpu_buffer_registry.as_mut().unwrap().clone();
                 let frame_index = self.frame_index.index();
                 let input_state = self.input_state.clone();
                 debug!("{:?}", input_state);
                 let delta_time = self.delta_time;
                 self.thread_pool.as_ref().unwrap().submit(move || {
                     let mut world = world.lock().unwrap();
-                    let mut cpu_queue_registry = cpu_queue_registry.lock().unwrap();
                     world.run_systems(
                         frame_index,
                         &input_state,
                         delta_time.as_secs_f32(),
-                        &mut cpu_queue_registry,
                     );
                 });
 
