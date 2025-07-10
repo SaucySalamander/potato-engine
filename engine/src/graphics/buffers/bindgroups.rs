@@ -1,8 +1,7 @@
 use std::any::Any;
 
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, Device,
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, Device,
 };
 pub trait BindGroupInterface: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;

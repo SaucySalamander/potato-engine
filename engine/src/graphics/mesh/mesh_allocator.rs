@@ -48,6 +48,7 @@ impl MeshAllocator {
         BufferEntry {
             buffer: buffer,
             bind_group: None,
+            element_count: 0,
         }
     }
 
@@ -62,6 +63,7 @@ impl MeshAllocator {
         BufferEntry {
             buffer: buffer,
             bind_group: None,
+            element_count: 0,
         }
     }
 

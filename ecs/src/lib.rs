@@ -16,6 +16,7 @@ pub mod components;
 mod entities;
 pub mod input;
 mod queries;
+mod systems;
 
 pub struct World {
     archetypes: Vec<(ArchetypeKey, Archetype)>,
@@ -41,6 +42,7 @@ impl World {
         delta_time: f32,
     ) {
         self.run_transform_system();
+        systems::update_fps_camera_system(self, input, delta_time);
     }
 
     fn run_transform_system(&mut self) {}

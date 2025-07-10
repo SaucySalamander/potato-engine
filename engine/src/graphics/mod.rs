@@ -1,11 +1,17 @@
-use std::process;
+use std::{process, sync::Mutex};
 
+use ecs::{
+    World,
+    components::{Camera, FpsCamera, MeshHandle, Position, Transform},
+};
+use glam::{Mat4, Vec3};
 use log::{error, info};
 use pollster::FutureExt;
 use wgpu::{
-    Adapter, CommandEncoder, Device, DeviceDescriptor, Features, Instance, Limits, Operations,
-    Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
-    RenderPipeline, RequestAdapterOptions, Surface, TextureView, Trace,
+    Adapter, BufferSize, CommandEncoder, Device, DeviceDescriptor, Features, Instance, Limits,
+    Operations, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
+    RenderPassDescriptor, RenderPipeline, RequestAdapterOptions, Surface, TextureView, Trace,
+    util::StagingBelt,
 };
 
 use crate::{
@@ -76,7 +82,6 @@ pub fn init_render_pass(
     gpu_buffer_registry: &mut Registry<Box<dyn BufferInterface>>,
     frame_index: &mut FrameIndex,
     mesh_allocator: &mut MeshAllocator,
-    draw_count: usize,
 ) {
     let render_pass_descriptor = &RenderPassDescriptor {
         label: Some("Example render pass"),
@@ -165,117 +170,144 @@ pub fn init_render_pass(
         wgpu::IndexFormat::Uint32,
     );
 
+    let draw_count = indirect_draw_gpu_entry.get_read(frame_index.index()).element_count;
+
     for i in 0..draw_count {
         render_pass.draw_indexed_indirect(
             indirect_draw_buffer,
-            (i * std::mem::size_of::<IndirectDraw>()) as u64,
+            i as u64 * std::mem::size_of::<IndirectDraw>() as u64,
         );
         // info!("gpu frame_index drawn: {}, drawcount: {}, i: {}", frame_index.index(), draw_count, i);
     }
 }
 
-    fn update_fps_camera_system(
-        &mut self,
-        input: &InputState,
-        delta_time: f32,
-        sim_frame_index: usize,
-        cpu_queue_registry: &mut Registry<Box<dyn QueueInterface + Send + Sync>>,
-    ) {
-        for (camera, pos, _) in self.query::<(&mut FpsCamera, &mut Position, &Camera)>() {
-            let forward = Vec3::new(
-                camera.yaw.cos() * camera.pitch.cos(),
-                camera.pitch.sin(),
-                camera.yaw.sin() * camera.pitch.cos(),
-            )
-            .normalize();
-            let right = forward.cross(Vec3::Y).normalize();
-            let up = right.cross(forward).normalize();
+pub fn upload_camera_data(
+    world: &mut World,
+    frame_index: usize,
+    staging_belt: &mut StagingBelt,
+    device: &Device,
+    encoder: &mut CommandEncoder,
+    gpu_buffer_registry: &mut Registry<Box<dyn BufferInterface>>,
+) {
+    let camera_buffer_key =
+        RegisterKey::from_label::<GpuRingBuffer<CameraUniform>>("camera_gpu_uniform_triple");
+    let camera_ring_buffer = gpu_buffer_registry
+        .get_mut(&camera_buffer_key)
+        .unwrap()
+        .as_mut_any()
+        .downcast_mut::<GpuRingBuffer<CameraUniform>>()
+        .unwrap();
+    for (camera, pos, _) in world.query::<(&mut FpsCamera, &mut Position, &Camera)>() {
+        let forward = Vec3::new(
+            camera.yaw.cos() * camera.pitch.cos(),
+            camera.pitch.sin(),
+            camera.yaw.sin() * camera.pitch.cos(),
+        )
+        .normalize();
 
-            // Movement
-            let mut velocity = Vec3::ZERO;
-            if input.key_w {
-                velocity += forward;
-            }
-            if input.key_s {
-                velocity -= forward;
-            }
-            if input.key_d {
-                velocity += right;
-            }
-            if input.key_a {
-                velocity -= right;
-            }
-            if input.key_space {
-                velocity += up;
-            }
-            if input.key_ctrl {
-                velocity -= up;
-            }
+        let camera_uniform = CameraUniform {
+            view: Mat4::look_to_rh(pos.0, forward, Vec3::Y).to_cols_array_2d(),
+            projection: Mat4::perspective_rh(0.785, 16.0 / 9.0, 0.1, 1000.0).to_cols_array_2d(),
+        };
 
-            if velocity.length_squared() > 0.0 {
-                *pos = Position(pos.0 + velocity.normalize() * camera.speed * delta_time);
-            }
+        let camera_entry = camera_ring_buffer.get_write(frame_index);
+        camera_entry.element_count = 1;
 
-            camera.yaw += input.mouse_delta_x * camera.sensitivity;
-            camera.pitch -= input.mouse_delta_y * camera.sensitivity;
-            camera.pitch = camera
-                .pitch
-                .clamp(-89.9_f32.to_radians(), 89.9_f32.to_radians());
-
-            //updating cpu buffers
-            let camera_queue_key =
-                RegisterKey::from_label::<CpuRingQueue<CameraUniform>>("camera_cpu_uniform_triple");
-            let camera_queue_entry = cpu_queue_registry.get_mut(&camera_queue_key).unwrap();
-            let camera_uniform_triple = camera_queue_entry
-                .as_mut_any()
-                .downcast_mut::<CpuRingQueue<CameraUniform>>()
-                .unwrap();
-            let camera_uniform = camera_uniform_triple.get_write(sim_frame_index);
-            camera_uniform.view = Mat4::look_to_rh(pos.0, forward, Vec3::Y).to_cols_array_2d();
-            camera_uniform.projection =
-                Mat4::perspective_rh(0.785, 16.0 / 9.0, 0.1, 1000.0).to_cols_array_2d();
-        }
-    }
-
-    fn run_render_submission_system(
-        &mut self,
-        sim_frame_index: usize,
-        cpu_queue_registry: &mut Registry<Box<dyn QueueInterface + Send + Sync>>,
-    ) {
-        let key = RegisterKey::from_label::<CpuRingQueue<Vec<IndirectDrawCommand>>>(
-            "indirect_draw_queue",
+        let mut view_mut = staging_belt.write_buffer(
+            encoder,
+            &camera_entry.buffer,
+            0,
+            BufferSize::new(size_of::<CameraUniform>() as u64).unwrap(),
+            device,
         );
-        if let Some(queue) = cpu_queue_registry.get_mut(&key) {
-            let queue = queue
-                .as_mut_any()
-                .downcast_mut::<CpuRingQueue<Vec<IndirectDrawCommand>>>()
-                .expect("Failed to downcast indirect draw queue");
 
-            // let prev_index = (sim_frame_index + 2) % 3;
-            // let prev_data = queue.get_read(prev_index).clone();
-
-            let mut first_instance_counter = 0;
-            let current_data = queue.get_write(sim_frame_index);
-            current_data.clear();
-
-            let mut batch: Vec<Transform> = Vec::new();
-            let mut mesh_handle = MeshHandle {
-                vertex_offset: 0,
-                index_offset: 0,
-                vertex_count: 0,
-                index_count: 0,
-            };
-
-            for (i, (transform, mesh)) in self.query::<(&Transform, &MeshHandle)>().enumerate() {
-                batch.push(transform.clone());
-                mesh_handle = mesh.clone();
-            }
-
-            current_data.push(IndirectDrawCommand {
-                instance_count: batch.len() as u32,
-                first_instance: first_instance_counter,
-                mesh: mesh_handle,
-                transform: batch.clone(),
-            });
-        }
+        view_mut.copy_from_slice(bytemuck::bytes_of(&camera_uniform));
     }
+}
+
+pub fn upload_indirect_draw_commands(
+    world: &mut World,
+    frame_index: usize,
+    staging_belt: &mut StagingBelt,
+    device: &Device,
+    encoder: &mut CommandEncoder,
+    gpu_buffer_registry: &mut Registry<Box<dyn BufferInterface>>,
+) {
+    let first_instance_counter = 0;
+
+    let mut batch: Vec<Transform> = Vec::new();
+    let mut mesh_handle = MeshHandle {
+        vertex_offset: 0,
+        index_offset: 0,
+        vertex_count: 0,
+        index_count: 0,
+    };
+
+    for (_i, (transform, mesh)) in world.query::<(&Transform, &MeshHandle)>().enumerate() {
+        batch.push(transform.clone());
+        mesh_handle = mesh.clone();
+    }
+
+    let indirect_draw = IndirectDraw {
+        index_count: mesh_handle.index_count,
+        instance_count: batch.len() as u32,
+        first_index: mesh_handle.index_offset as u32,
+        base_vertex: mesh_handle.vertex_offset as i32,
+        first_instance: first_instance_counter,
+        ..Default::default()
+    };
+
+    // indirect_draws.iter().for_each(|x| info!("{:?}", x));
+
+    let mut model_matrices: Vec<ModelUniform> = Vec::new();
+    batch.iter().for_each(|x| {
+        model_matrices.push(ModelUniform {
+            model: x.0.to_cols_array_2d(),
+        });
+    });
+
+    let indirect_draw_buffer_key =
+        RegisterKey::from_label::<GpuRingBuffer<IndirectDraw>>("indirect_draw_buffer");
+    let indirect_draw_buffer = gpu_buffer_registry
+        .get_mut(&indirect_draw_buffer_key)
+        .unwrap()
+        .as_mut_any()
+        .downcast_mut::<GpuRingBuffer<IndirectDraw>>()
+        .unwrap();
+
+    let indirect_entry = indirect_draw_buffer.get_write(frame_index);
+    indirect_entry.element_count = 1;
+
+    let mut indirect_draw_view_mut = staging_belt.write_buffer(
+        encoder,
+        &indirect_entry.buffer,
+        0,
+        BufferSize::new(size_of::<IndirectDraw>() as u64).unwrap(),
+        device,
+    );
+    indirect_draw_view_mut.copy_from_slice(bytemuck::bytes_of(&indirect_draw));
+    std::mem::drop(indirect_draw_view_mut);
+
+    let model_buffer_key =
+        RegisterKey::from_label::<GpuRingBuffer<ModelUniform>>("model_gpu_uniform_triple");
+    let model_buffer = gpu_buffer_registry
+        .get_mut(&model_buffer_key)
+        .unwrap()
+        .as_mut_any()
+        .downcast_mut::<GpuRingBuffer<ModelUniform>>()
+        .unwrap();
+
+    let model_entry = model_buffer.get_write(frame_index);
+    model_entry.element_count = model_matrices.len() as u32;
+
+    let model_matrices_bytes = bytemuck::cast_slice(&model_matrices);
+    let total_model_matrices_size = BufferSize::new(model_matrices_bytes.len() as u64).unwrap();
+    let mut model_matrices_view_mut = staging_belt.write_buffer(
+        encoder,
+        &model_entry.buffer,
+        0,
+        total_model_matrices_size,
+        device,
+    );
+    model_matrices_view_mut.copy_from_slice(model_matrices_bytes);
+}
