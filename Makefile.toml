@@ -11,6 +11,10 @@ args = ["clean"]
 command = "cargo"
 args = ["build"]
 
+[tasks.build_tracy]
+command = "cargo"
+args = ["build", "--features", "tracy"]
+
 [tasks.clean_run]   
 workspace = false
 command = "./target/debug/test_game"
@@ -20,3 +24,8 @@ dependencies = ["clean", "build"]
 workspace = false
 command = "./target/debug/test_game"
 dependencies = ["build"]
+
+[tasks.run_tracy]
+workspace = false
+command = "./target/debug/test_game"
+dependencies = ["build_tracy"]

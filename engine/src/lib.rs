@@ -1,12 +1,13 @@
+use glam::{Mat4, Vec3};
+use log::{debug, error, info};
 use std::{
     mem::transmute,
     process,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-
-use glam::{Mat4, Vec3};
-use log::{debug, error, info};
+#[cfg(feature = "tracy")]
+use tracy_client::{plot, span};
 use wgpu::{
     BindGroupLayout, Color, DepthBiasState, DepthStencilState, FragmentState, Instance,
     MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPipeline,
@@ -24,9 +25,10 @@ use crate::{
     r#async::FrameIndex,
     graphics::{
         buffers::{
-            submissions::{CameraUniform, IndirectDraw, ModelUniform}, BufferInterface
+            BufferInterface,
+            submissions::{CameraUniform, IndirectDraw, ModelUniform},
         },
-        mesh::{mesh_allocator::MeshAllocator, Vertex},
+        mesh::{Vertex, mesh_allocator::MeshAllocator},
         upload_camera_data, upload_indirect_draw_commands,
     },
     utils::{FPSCounter, RegisterKey, Registry, ThreadPool},
@@ -424,6 +426,12 @@ impl Engine {
 
 impl ApplicationHandler for Engine {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        #[cfg(feature = "tracy")]
+        tracy_client::Client::start();
+
+        #[cfg(feature = "tracy")]
+        span!("Winit::resumed");
+
         if self.startup {
             self.init(event_loop);
 
@@ -507,6 +515,9 @@ impl ApplicationHandler for Engine {
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {
+                #[cfg(feature = "tracy")]
+                span!("Winit::event::WindowEvent::RedrawRequested");
+
                 let viewport = self.viewports.get(0).expect("viewport must exist");
                 let descriptor = &viewport.description;
                 let render_pipeline = self
@@ -601,11 +612,22 @@ impl ApplicationHandler for Engine {
     }
 
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        #[cfg(feature = "tracy")]
+        span!("Winit::about_to_wait");
+
         if let Some(window) = &self.window {
             let now = Instant::now();
             let frame_time = now - self.last_time;
             self.last_time = now;
             self.accumulator += frame_time;
+
+            #[cfg(feature = "tracy")]
+            plot!("Accumulator (ms)", self.accumulator.as_secs_f64() * 1000.0);
+            #[cfg(feature = "tracy")]
+            plot!("Real Frame Time (ms)", frame_time.as_secs_f64() * 1000.0);
+
+            #[cfg(feature = "tracy")]
+            span!("ECS Tick Loop");
 
             while self.accumulator >= self.delta_time {
                 let world = self.world.clone();
@@ -613,7 +635,11 @@ impl ApplicationHandler for Engine {
                 let input_state = self.input_state.clone();
                 debug!("{:?}", input_state);
                 let delta_time = self.delta_time;
+                #[cfg(feature = "tracy")]
+                span!("ECS Tick Submission");
                 self.thread_pool.as_ref().unwrap().submit(move || {
+                    #[cfg(feature = "tracy")]
+                    span!("World.run_systems");
                     let mut world = world.lock().unwrap();
                     world.run_systems(frame_index, &input_state, delta_time.as_secs_f32());
                 });
@@ -621,11 +647,16 @@ impl ApplicationHandler for Engine {
                 self.input_state.mouse_delta_x = 0.0;
                 self.input_state.mouse_delta_y = 0.0;
 
-                self.sim_frame_index.advance();
+                // self.sim_frame_index.advance();
                 self.accumulator -= self.delta_time;
             }
 
             window.request_redraw();
+
+            #[cfg(feature = "tracy")]
+            tracy_client::Client::running()
+                .expect("Tracy client must be running to mark a frame")
+                .frame_mark();
 
             let next_logic_update = now + (self.delta_time - self.accumulator);
             event_loop

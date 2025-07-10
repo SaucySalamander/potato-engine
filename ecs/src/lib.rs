@@ -41,11 +41,8 @@ impl World {
         input: &InputState,
         delta_time: f32,
     ) {
-        self.run_transform_system();
         systems::update_fps_camera_system(self, input, delta_time);
     }
-
-    fn run_transform_system(&mut self) {}
 
     pub fn spawn<T: ComponentTuple>(&mut self, components: T) -> EntityId {
         let entity = self.entity_allocator.allocate();
