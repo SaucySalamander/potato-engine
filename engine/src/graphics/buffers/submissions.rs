@@ -99,6 +99,7 @@ impl IndirectDraw {
             buffer_entries.push(BufferEntry {
                 buffer: buffer,
                 bind_group: Some(bind_group),
+                element_count: 0,
             });
         }
 
@@ -194,6 +195,7 @@ impl CameraUniform {
             buffer_entries.push(BufferEntry {
                 buffer: buffer,
                 bind_group: Some(bind_group),
+                element_count: 0,
             });
         }
 
@@ -277,6 +279,7 @@ impl ModelUniform {
             buffer_entires.push(BufferEntry {
                 buffer,
                 bind_group: Some(bind_group),
+                element_count: 0,
             });
         }
 

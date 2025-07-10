@@ -11,7 +11,7 @@ use wgpu::{
     BindGroupLayout, Color, DepthBiasState, DepthStencilState, FragmentState, Instance,
     MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPipeline,
     RenderPipelineDescriptor, ShaderModule, StencilState, Surface, VertexAttribute,
-    VertexBufferLayout, VertexFormat, VertexState,
+    VertexBufferLayout, VertexFormat, VertexState, util::StagingBelt,
 };
 use winit::{
     application::ApplicationHandler,
@@ -22,20 +22,19 @@ use winit::{
 
 use crate::{
     r#async::FrameIndex,
-    graphics::buffers::{
-        BufferInterface,
-        submissions::{CameraUniform, IndirectDraw, ModelUniform},
-        sync_buffers,
+    graphics::{
+        buffers::{
+            submissions::{CameraUniform, IndirectDraw, ModelUniform}, BufferInterface
+        },
+        mesh::{mesh_allocator::MeshAllocator, Vertex},
+        upload_camera_data, upload_indirect_draw_commands,
     },
-    graphics::mesh::{Vertex, mesh_allocator::MeshAllocator},
-    input::InputState,
     utils::{FPSCounter, RegisterKey, Registry, ThreadPool},
 };
 use ecs::{
     World,
     commands::IndirectDrawCommand,
     components::{self, Camera, FpsCamera, Position},
-    queues::{CpuRingQueue, QueueInterface},
 };
 use graphics::{
     GPUContext, init_render_pass,
@@ -94,8 +93,7 @@ pub struct Engine {
     sim_frame_index: FrameIndex,
     frame_index: FrameIndex,
     bind_group_layout_registry: Option<Registry<BindGroupLayout>>,
-    cpu_buffer_registry:
-        Option<Arc<Mutex<ecs::registries::Registry<Box<dyn QueueInterface + Send + Sync>>>>>,
+    staging_belt: Option<Arc<Mutex<StagingBelt>>>,
     gpu_buffer_registry: Option<Registry<Box<dyn BufferInterface>>>,
     mesh_allocator: Option<MeshAllocator>,
     input_state: ecs::input::InputState,
@@ -118,8 +116,8 @@ impl<'a> Default for Engine {
             fps_counter: None,
             bind_group_layout_registry: None,
             mesh_allocator: None,
+            staging_belt: None,
             gpu_buffer_registry: None,
-            cpu_buffer_registry: None,
             thread_pool: None,
             viewports: Vec::new(),
             input_state: ecs::input::InputState::default(),
@@ -153,7 +151,6 @@ impl Engine {
         let shader = &self.load_shaders();
 
         self.setup_buffers();
-        self.setup_queues();
 
         self.create_render_pipeline(shader);
 
@@ -164,42 +161,13 @@ impl Engine {
         );
     }
 
-    fn setup_queues(&mut self) {
-        info!("creating cpu buffer registry");
-        self.cpu_buffer_registry = Some(Arc::new(Mutex::new(ecs::registries::Registry::<
-            Box<dyn QueueInterface + Send + Sync>,
-        >::default())));
-        let mut cpu_buffer_registry = self.cpu_buffer_registry.as_mut().unwrap().lock().unwrap();
-        let camera_cpu_uniform_key = ecs::registries::RegisterKey::from_label::<
-            CpuRingQueue<ecs::cameras::CameraUniform>,
-        >("camera_cpu_uniform_triple");
-        cpu_buffer_registry.register_key(
-            camera_cpu_uniform_key,
-            Box::new(CpuRingQueue::<ecs::cameras::CameraUniform>::new(
-                ecs::cameras::CameraUniform::default(),
-            )),
-        );
-        // let model_cpu_uniform_key =
-        //     RegisterKey::from_label::<CpuRingQueue<ModelUniform>>("model_cpu_uniform_triple");
-        // cpu_buffer_registry.register_key(
-        //     model_cpu_uniform_key,
-        //     Box::new(CpuRingQueue::<ModelUniform>::new(ModelUniform::default())),
-        // );
-        let indirect_draw_cpu_key = ecs::registries::RegisterKey::from_label::<
-            CpuRingQueue<Vec<IndirectDrawCommand>>,
-        >("indirect_draw_queue");
-        cpu_buffer_registry.register_key(
-            indirect_draw_cpu_key,
-            Box::new(CpuRingQueue::<Vec<IndirectDrawCommand>>::new(vec![
-                IndirectDrawCommand::default(),
-            ])),
-        );
-    }
-
     fn setup_buffers(&mut self) {
         let gpu_context = self.gpu_context.as_ref().expect("gpu context should exist");
         let device = &gpu_context.device;
         let queue = &gpu_context.queue;
+
+        let chunck_size = 128 * 1024 * 1024;
+        self.staging_belt = Some(Arc::new(Mutex::new(StagingBelt::new(chunck_size))));
 
         info!("creating bind group layout registry");
         self.bind_group_layout_registry = Some(Registry::<BindGroupLayout>::default());
@@ -545,17 +513,6 @@ impl ApplicationHandler for Engine {
                     .render_pipeline
                     .as_ref()
                     .expect("render pipeline must exist");
-                sync_buffers(
-                    self.cpu_buffer_registry.as_mut().unwrap(),
-                    self.gpu_buffer_registry.as_mut().unwrap(),
-                    self.sim_frame_index.index(),
-                    self.frame_index.index(),
-                    &self
-                        .gpu_context
-                        .as_ref()
-                        .expect("gpu context must exist")
-                        .queue,
-                );
 
                 descriptor.window.pre_present_notify();
                 let output = descriptor.surface.get_current_texture().unwrap();
@@ -569,22 +526,28 @@ impl ApplicationHandler for Engine {
                     .device
                     .create_command_encoder(&Default::default());
 
-                let indirect_draw_key = ecs::registries::RegisterKey::from_label::<
-                    CpuRingQueue<Vec<IndirectDrawCommand>>,
-                >("indirect_draw_queue");
-                let draw_count = self
-                    .cpu_buffer_registry
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .get(&indirect_draw_key)
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<CpuRingQueue<Vec<IndirectDrawCommand>>>()
-                    .unwrap()
-                    .get_read(self.frame_index.index())
-                    .len();
+                let mut staging_belt = self.staging_belt.as_mut().unwrap().lock().unwrap();
+                let gpu_buffer_registry = self.gpu_buffer_registry.as_mut().unwrap();
+                let device = &self.gpu_context.as_ref().unwrap().device;
+                let frame_index = self.frame_index.index();
+                let mut world = self.world.lock().unwrap();
+                upload_camera_data(
+                    &mut world,
+                    frame_index,
+                    &mut staging_belt,
+                    device,
+                    &mut encoder,
+                    gpu_buffer_registry,
+                );
+
+                upload_indirect_draw_commands(
+                    &mut world,
+                    frame_index,
+                    &mut staging_belt,
+                    device,
+                    &mut encoder,
+                    gpu_buffer_registry,
+                );
 
                 init_render_pass(
                     &mut encoder,
@@ -596,8 +559,9 @@ impl ApplicationHandler for Engine {
                         .expect("gpu buffer registry should exist"),
                     &mut self.frame_index,
                     self.mesh_allocator.as_mut().unwrap(),
-                    draw_count,
                 );
+
+                staging_belt.finish();
 
                 let _ = self
                     .gpu_context
@@ -607,6 +571,8 @@ impl ApplicationHandler for Engine {
                     .submit(Some(encoder.finish()));
 
                 output.present();
+
+                staging_belt.recall();
 
                 self.frame_index.advance();
                 self.fps_counter
@@ -643,20 +609,13 @@ impl ApplicationHandler for Engine {
 
             while self.accumulator >= self.delta_time {
                 let world = self.world.clone();
-                let cpu_queue_registry = self.cpu_buffer_registry.as_mut().unwrap().clone();
                 let frame_index = self.frame_index.index();
                 let input_state = self.input_state.clone();
                 debug!("{:?}", input_state);
                 let delta_time = self.delta_time;
                 self.thread_pool.as_ref().unwrap().submit(move || {
                     let mut world = world.lock().unwrap();
-                    let mut cpu_queue_registry = cpu_queue_registry.lock().unwrap();
-                    world.run_systems(
-                        frame_index,
-                        &input_state,
-                        delta_time.as_secs_f32(),
-                        &mut cpu_queue_registry,
-                    );
+                    world.run_systems(frame_index, &input_state, delta_time.as_secs_f32());
                 });
 
                 self.input_state.mouse_delta_x = 0.0;
