@@ -621,7 +621,7 @@ impl ApplicationHandler for Engine {
                 self.input_state.mouse_delta_x = 0.0;
                 self.input_state.mouse_delta_y = 0.0;
 
-                self.sim_frame_index.advance();
+                // self.sim_frame_index.advance();
                 self.accumulator -= self.delta_time;
             }
 
